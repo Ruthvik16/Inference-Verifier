@@ -37,68 +37,91 @@ class PipelineController:
         self.checkpoint_interval = self.config["llm"]["checkpoint_interval"]
         self.max_cot_tokens = self.config["llm"]["max_cot_tokens"]
 
+        
+    def _inject_feedback(self, input_ids, feedback):
+        feedback_text = f"""
+    IMPORTANT:
+    You made a mistake.
+
+    Instruction:
+    {feedback}
+
+    You MUST follow this before continuing.
+
+    Now continue:
+    """
+
+        feedback_ids = self.cot_generator.encode(feedback_text)["input_ids"]
+
+        return torch.cat([input_ids, feedback_ids], dim=1)
+
+
     # ----------------------------------------------------------------------
     # MAIN EXECUTION ENTRY POINT
     # ----------------------------------------------------------------------
     def run(self, user_query):
         """
-        Executes the full pipeline and returns the final answer.
+        Executes the full pipeline with:
+        - sentence-level verification
+        - inline corrective feedback injection
         """
 
         print_debug("Starting pipeline...", self.debug_cfg)
 
-        # The CoT string we build up gradually
         full_cot = ""
-        # Count how many times verifier was called
         verifier_call_count = 0
 
-        # Initial prompt that instructs model to think step-by-step
-        prompt = (
-            f"{user_query}\n"
-        )
+        prompt = f"{user_query}\n"
+        input_ids = None
 
-        # Prepare for incremental generation
-        input_ids = None  # will be updated per checkpoint
+        sentence_endings = [".", "?", "!"]
 
-        # ======================================================
-        # MAIN GENERATION LOOP
-        # ======================================================
         for global_step in range(0, self.max_cot_tokens, self.checkpoint_interval):
 
-            # 1. Generate until next checkpoint
-            # First iteration: input_ids is None → pass prompt
-            # Later iterations: pass input_ids tensor
+            # ------------------------------------------------------
+            # 1. Generate
+            # ------------------------------------------------------
             source = prompt if input_ids is None else input_ids
 
-            partial_text, logprobs, input_ids = self.cot_generator.generate_until_checkpoint(source)
-
+            partial_text, logprobs, input_ids = \
+                self.cot_generator.generate_until_checkpoint(source)
 
             full_cot += partial_text
 
-            if self.debug_cfg["print_partial_cot"]:
-                print("\n[DEBUG Partial CoT]")
-                print(partial_text)
+            # ------------------------------------------------------
+            # 2. Wait for logical statement completion
+            # ------------------------------------------------------
+            if not any(p in full_cot[-3:] for p in sentence_endings):
+                prompt = None
+                continue
 
-            # 2. Call verifier
+            # ------------------------------------------------------
+            # 3. Verifier
+            # ------------------------------------------------------
             verifier_call_count += 1
-            verdict = self.verifier.evaluate(full_cot, logprobs)
+
+            verifier_output = self.verifier.evaluate(full_cot, logprobs)
+            status = verifier_output["status"]
+            feedback = verifier_output.get("feedback", "")
 
             if self.debug_cfg["print_verifier_decision"]:
-                print(f"[Verifier Verdict] {verdict}")
+                print(f"[Verifier Status] {status}")
+                print(f"[Verifier Feedback] {feedback}")
 
-            # 3. Decide what to do
-            decision = self.exit_logic.decide(verdict, verifier_call_count)
+            # ------------------------------------------------------
+            # 4. Decision
+            # ------------------------------------------------------
+            decision = self.exit_logic.decide(status, verifier_call_count)
 
-            # Add debug logs to trace intermediate reasoning and decisions
-            print("[DEBUG] Partial CoT reasoning:", partial_text)
-            print("[DEBUG] Verifier verdict:", verdict)
-            print("[DEBUG] Early exit decision:", decision)
+            print("[DEBUG] Partial CoT:", partial_text)
+            print("[DEBUG] Status:", status)
+            print("[DEBUG] Decision:", decision)
 
-            # ==============================
-            # Handle controller decisions
-            # ==============================
+            # ------------------------------------------------------
+            # 5. Exit
+            # ------------------------------------------------------
             if decision == "exit":
-                print_debug("Early exit triggered. Generating final answer...", self.debug_cfg)
+                print_debug("Early exit triggered...", self.debug_cfg)
 
                 final_answer = self.final_answer_gen.generate_final_answer(full_cot)
 
@@ -107,19 +130,38 @@ class PipelineController:
 
                 return final_answer
 
-            elif decision == "abort":
-                print_debug("Verifier marked reasoning as incorrect. Aborting pipeline.", self.debug_cfg)
-                return "The reasoning seems incorrect. Cannot provide a reliable answer."
+            # ------------------------------------------------------
+            # 6. INLINE FEEDBACK INJECTION (NEW)
+            # ------------------------------------------------------
+            # if status == "incorrect":
+            #     print_debug("Injecting inline correction...", self.debug_cfg)
 
-            else:
-                # Continue generating reasoning
-                prompt = None
-                continue
+            #     input_ids = self._inject_feedback(input_ids, feedback)
 
-        # ======================================================
-        # If we reach here → max tokens reached, no early exit
-        # ======================================================
-        print_debug("Max CoT reached. Generating final answer...", self.debug_cfg)
+            #     # Also reflect in text (for debugging + final answer consistency)
+            #     full_cot += f"\n[CORRECTION]: {feedback}\n"
+
+            #     continue
+            if status == "incorrect":
+                guidance = f"""
+            You MUST follow this:
+            {feedback}
+            """
+
+                guidance_ids = tokenizer(guidance, return_tensors="pt")["input_ids"].to(model.device)
+
+                # 🔥 concatenate BEFORE next forward pass
+                input_ids = torch.cat([guidance_ids, input_ids], dim=1)
+
+            # ------------------------------------------------------
+            # 7. Continue normal generation
+            # ------------------------------------------------------
+            prompt = None
+
+        # ----------------------------------------------------------
+        # 8. Fallback
+        # ----------------------------------------------------------
+        print_debug("Max CoT reached...", self.debug_cfg)
+
         final_answer = self.final_answer_gen.generate_final_answer(full_cot)
-
         return final_answer

@@ -166,11 +166,27 @@ class CoTGenerator:
         generated_text = ""
         logprobs = []
 
-        for _ in range(self.checkpoint_interval):
+        # for _ in range(self.checkpoint_interval):
+        #     tok_id, tok_text, tok_logprob, input_ids = self.generate_next_token(input_ids)
+        #     generated_text += tok_text
+        #     if tok_logprob is not None:
+        #         logprobs.append(tok_logprob)
+
+        generated_text = ""
+        logprobs = []
+
+        sentence_end_tokens = {".", "?", "!"}
+
+        while True:
             tok_id, tok_text, tok_logprob, input_ids = self.generate_next_token(input_ids)
+
             generated_text += tok_text
             if tok_logprob is not None:
                 logprobs.append(tok_logprob)
+
+            # Check if sentence ended
+            if any(p in generated_text[-3:] for p in [".", "?", "!"]):
+                break
 
         return generated_text, logprobs, input_ids
 

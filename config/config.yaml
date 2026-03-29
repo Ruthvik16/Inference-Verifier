@@ -58,4 +58,6 @@ generation:
 # Debug Settings
 # --------------------------
 debug:
-  print: true
+  print_partial_cot: true
+  print_verifier_decision: true
+  print_final_answer: true

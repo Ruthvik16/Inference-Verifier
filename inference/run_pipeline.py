@@ -64,11 +64,11 @@ def main():
     print("\nProcessing question...")
     final_answer = controller.run(args.question)
 
-    print("\n========================================")
-    print("                 FINAL ANSWER")
-    print("========================================")
-    print(final_answer)
-    print("========================================\n")
+    # print("\n========================================")
+    # print("                 FINAL ANSWER")
+    # print("========================================")
+    # print(final_answer)
+    # print("========================================\n")
 
 
 if __name__ == "__main__":
